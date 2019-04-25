@@ -1,3 +1,4 @@
+# %load ../DiscriminativeActiveLearning/main.py
 """
 The main file which runs our active learning experiments. The experiment results are saved in pickle files that we later
 analyze over many experiments to produce the plots in our blog.
@@ -9,21 +10,22 @@ import sys
 import argparse
 from keras.utils import to_categorical
 from sklearn.datasets import load_boston, load_diabetes
+from sklearn import metrics
 
 from models import *
 from query_methods import *
 
 def parse_input():
     p = argparse.ArgumentParser()
-    p.add_argument('experiment_index', type=int, help="index of current experiment")
-    p.add_argument('data_type', type=str, choices={'mnist', 'cifar10', 'cifar100'}, help="data type (mnist/cifar10/cifar100)")
-    p.add_argument('batch_size', type=int, help="active learning batch size")
-    p.add_argument('initial_size', type=int, help="initial sample size for active learning")
-    p.add_argument('iterations', type=int, help="number of active learning batches to sample")
-    p.add_argument('method', type=str,
+    p.add_argument('-experiment_index', type=int, help="index of current experiment")
+    p.add_argument('-data_type', type=str, choices={'mnist', 'cifar10', 'cifar100', 'PMPS'}, help="data type (mnist/cifar10/cifar100/PMPS)")
+    p.add_argument('-batch_size', type=int, help="active learning batch size")
+    p.add_argument('-initial_size', type=int, help="initial sample size for active learning")
+    p.add_argument('-iterations', type=int, help="number of active learning batches to sample")
+    p.add_argument('-method', type=str,
                    choices={'Random','CoreSet','CoreSetMIP','Discriminative','DiscriminativeLearned','DiscriminativeAE','DiscriminativeStochastic','Uncertainty','Bayesian','UncertaintyEntropy','BayesianEntropy','EGL','Adversarial'},
                    help="sampling method ('Random','CoreSet','CoreSetMIP','Discriminative','DiscriminativeLearned','DiscriminativeAE','DiscriminativeStochastic','Uncertainty','Bayesian','UncertaintyEntropy','BayesianEntropy','EGL','Adversarial')")
-    p.add_argument('experiment_folder', type=str,
+    p.add_argument('-experiment_folder', type=str,
                    help="folder where the experiment results will be saved")
     p.add_argument('--method2', '-method2', type=str,
                    choices={None,'Random','CoreSet','CoreSetMIP','Discriminative','DiscriminativeLearned','DiscriminativeAE','DiscriminativeStochastic','Uncertainty','Bayesian','UncertaintyEntropy','BayesianEntropy','EGL','Adversarial'},
@@ -87,21 +89,22 @@ def load_cifar_10():
     """
     load and pre-process the CIFAR-10 data
     """
+    from keras.datasets import cifar10
+    (x_train, y_train), (x_test, y_test) = cifar10.load_data()
+#     dirname = ''  # TODO: your path here
 
-    dirname = ''  # TODO: your path here
+#     num_train_samples = 50000
 
-    num_train_samples = 50000
+#     x_train = np.empty((num_train_samples, 3, 32, 32), dtype='uint8')
+#     y_train = np.empty((num_train_samples,), dtype='uint8')
 
-    x_train = np.empty((num_train_samples, 3, 32, 32), dtype='uint8')
-    y_train = np.empty((num_train_samples,), dtype='uint8')
+#     for i in range(1, 6):
+#         fpath = os.path.join(dirname, 'data_batch_' + str(i))
+#         (x_train[(i - 1) * 10000: i * 10000, :, :, :],
+#          y_train[(i - 1) * 10000: i * 10000]) = load_batch(fpath)
 
-    for i in range(1, 6):
-        fpath = os.path.join(dirname, 'data_batch_' + str(i))
-        (x_train[(i - 1) * 10000: i * 10000, :, :, :],
-         y_train[(i - 1) * 10000: i * 10000]) = load_batch(fpath)
-
-    fpath = os.path.join(dirname, 'test_batch')
-    x_test, y_test = load_batch(fpath)
+#     fpath = os.path.join(dirname, 'test_batch')
+#     x_test, y_test = load_batch(fpath)
 
     y_train = np.reshape(y_train, (len(y_train), 1))
     y_test = np.reshape(y_test, (len(y_test), 1))
@@ -153,6 +156,21 @@ def load_cifar_100(label_mode='fine'):
 
     return (x_train, y_train), (x_test, y_test)
 
+def load_PMPS():
+    """
+    load and pre-process the PMPS-26k data
+    """
+
+    x = np.load('/disk1/ska_paper/data/PMPS-26k_npy/x_subints.npy')
+    y = np.load('/disk1/ska_paper/data/PMPS-26k_npy/y_subints.npy')
+    y = np.argmax(y, axis=1)
+    x = x / 255.
+    from sklearn.model_selection import train_test_split
+    x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2,
+                                                        random_state=27, shuffle=True,
+                                                       stratify=y)
+
+    return (x_train, y_train), (x_test, y_test)
 
 def evaluate_sample(training_function, X_train, Y_train, X_test, Y_test, checkpoint_path):
     """
@@ -174,14 +192,31 @@ def evaluate_sample(training_function, X_train, Y_train, X_test, Y_test, checkpo
     # train and evaluate the model:
     model = training_function(X_train, Y_train, X_validation, Y_validation, checkpoint_path, gpu=args.gpu)
     if args.data_type in ['imdb', 'wiki']:
-        acc = model.evaluate(X_test, Y_test, verbose=0)
+        score = model.evaluate(X_test, Y_test, verbose=0)
     else:
-        loss, acc = model.evaluate(X_test, Y_test, verbose=0)
+        if args.data_type == 'PMPS':
+            Y_pred = model.predict(X_test)
+            score = metrics.precision_recall_fscore_support(np.argmax(Y_test, axis=1), np.argmax(Y_pred, axis=1), average='binary')[2]
+        else:
+            loss, score = model.evaluate(X_test, Y_test, verbose=0)
 
-    return acc, model
+    return score, model
 
 
 if __name__ == '__main__':
+    import tensorflow as tf
+
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True  # 不全部占满显存, 按需分配
+    session = tf.Session(config=config)
+
+    from keras import backend as K
+
+    num_cores = 8
+    config = tf.ConfigProto(intra_op_parallelism_threads=num_cores, inter_op_parallelism_threads=num_cores,
+                            allow_soft_placement=True, device_count={'CPU': 4})
+    session = tf.Session(config=config)
+    K.set_session(session)
 
     # parse the arguments:
     args = parse_input()
@@ -211,6 +246,14 @@ if __name__ == '__main__':
         else:
             input_shape = (3, 32, 32)
         evaluation_function = train_cifar100_model
+    if args.data_type == 'PMPS':
+        (X_train, Y_train), (X_test, Y_test) = load_PMPS()
+        num_labels = 2
+        if K.image_data_format() == 'channels_last':
+            input_shape = (64, 64, 1)
+        else:
+            input_shape = (1, 64, 64)
+        evaluation_function = train_PMPS_model
 
     # make categorical:
     Y_train = to_categorical(Y_train)
@@ -369,3 +412,4 @@ if __name__ == '__main__':
     with open(entropy_path, 'wb') as f:
         pickle.dump([entropies, label_distributions, queries], f)
         print("Saved entropy statistics to " + entropy_path)
+

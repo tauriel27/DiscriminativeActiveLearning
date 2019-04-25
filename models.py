@@ -5,7 +5,7 @@ model for MNIST, a VGG model for CIFAR and a multilayer perceptron model for dic
 
 import numpy as np
 
-from keras.callbacks import Callback
+from keras.callbacks import Callback, EarlyStopping, ReduceLROnPlateau
 from keras.models import Sequential, Model
 from keras.layers import Dense, Dropout, Flatten, Activation, Input, UpSampling2D
 from keras.layers import Conv2D, MaxPooling2D, BatchNormalization
@@ -14,6 +14,11 @@ from keras import regularizers
 from keras import backend as K
 from keras.models import load_model
 from keras.utils import to_categorical, multi_gpu_model
+
+from sklearn import metrics
+
+import my_model
+import my_utils
 
 class DiscriminativeEarlyStopping(Callback):
     """
@@ -38,6 +43,8 @@ class DiscriminativeEarlyStopping(Callback):
             self.model.stop_training = True
 
 
+
+
 class DelayedModelCheckpoint(Callback):
     """
     A custom callback for saving the model each time the validation accuracy improves. The custom part is that we save
@@ -45,14 +52,15 @@ class DelayedModelCheckpoint(Callback):
     iterations to save time.
     """
 
-    def __init__(self, filepath, monitor='val_acc', delay=50, verbose=0, weights=False):
+    def __init__(self, filepath, monitor='val_acc', delay=20, verbose=0, weights=False, greater_is_better=True):
 
         super(DelayedModelCheckpoint, self).__init__()
         self.monitor = monitor
+        self.greater_is_better = greater_is_better
         self.verbose = verbose
         self.filepath = filepath
         self.delay = delay
-        if self.monitor == 'val_acc':
+        if self.greater_is_better:
             self.best = -np.Inf
         else:
             self.best = np.Inf
@@ -74,6 +82,28 @@ class DelayedModelCheckpoint(Callback):
                     self.model.save_weights(self.filepath, overwrite=True)
                 else:
                     self.model.save(self.filepath, overwrite=True)
+        elif self.monitor == 'val_f1':
+            val_y_pred = self.model.predict(self.validation_data[0])
+            val_y_true = self.validation_data[1]
+            _val_precision, _val_recall, _val_f1, _ = metrics.precision_recall_fscore_support(
+                np.argmax(val_y_pred, axis=1), np.argmax(val_y_true, axis=1), average='binary')
+            print(" - val_f1: % f - val_precision: % f - val_recall % f" % (
+            _val_f1, _val_precision, _val_recall))
+            if self.verbose > 0:
+                current = _val_f1
+
+                if current >= self.best and epoch > self.delay:
+                    if self.verbose > 0:
+                        print('\nEpoch %05d: %s improved from %0.5f to %0.5f,'
+                              ' saving model to %s'
+                              % (epoch, self.monitor, self.best,
+                                 current, self.filepath))
+                    self.best = current
+                    if self.weights:
+                        self.model.save_weights(self.filepath, overwrite=True)
+                    else:
+                        self.model.save(self.filepath, overwrite=True)
+
         else:
             current = logs.get(self.monitor)
             if current <= self.best and epoch > self.delay:
@@ -443,4 +473,56 @@ def train_cifar100_model(X_train, Y_train, X_validation, Y_validation, checkpoin
         model.load_weights(checkpoint_path)
         return model
 
+
+def train_PMPS_model(X_train, Y_train, X_validation, Y_validation, checkpoint_path, gpu=1):
+    """
+    A function that trains and returns a CNN model on the labeled PMPS data.
+    """
+
+    if K.image_data_format() == 'channels_last':
+        input_shape = (64, 64, 1)
+    else:
+        input_shape = (1, 64, 64)
+
+    # model = get_VGG_model(input_shape=input_shape, labels=100)
+    model = my_model.get_my_model()
+    optimizer = optimizers.Adam(lr=0.0001)
+    model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+
+    early_stopper = EarlyStopping(patience=7)
+    lr_reducer = ReduceLROnPlateau(patience=3)
+    f1_metrics = my_utils.PrecisionRecallFscore()
+    callbacks = [early_stopper, lr_reducer, DelayedModelCheckpoint(filepath=checkpoint_path, monitor='val_f1', delay=10, verbose=1, weights=True)]
+
+    if gpu > 1:
+        gpu_model = ModelMGPU(model, gpus = gpu)
+        gpu_model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+        gpu_model.fit(X_train, Y_train,
+                      epochs=1000,
+                      batch_size=1024,
+                      shuffle=True,
+                      validation_data=(X_validation, Y_validation),
+                      callbacks=callbacks,
+                      verbose=2)
+
+        del gpu_model
+        del model
+
+        model = get_VGG_model(input_shape=input_shape, labels=100)
+        model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+        model.load_weights(checkpoint_path)
+
+        return model
+
+    else:
+        model.fit(X_train, Y_train,
+                      epochs=1000,
+                      batch_size=512,
+                      shuffle=True,
+                      validation_data=(X_validation, Y_validation),
+                      callbacks=callbacks,
+                      verbose=2)
+
+        model.load_weights(checkpoint_path)
+        return model
 
